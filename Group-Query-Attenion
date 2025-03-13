@@ -1,0 +1,53 @@
+import torch
+from torch import  nn
+import math
+
+class Group_Query_Attention(nn.Module):
+    def __init__(self, d_module, n_query_head, n_kandv):
+        super().__init__()
+
+        assert d_module % n_query_head == 0
+        assert n_query_head % n_kandv == 0 #n个query head 为一组
+
+        self.d_module = d_module
+        self.n_query_head = n_query_head#q_head 的数量
+        self.n_kandv = n_kandv#v和k的数量
+        self.n_groupsize = d_module // n_query_head  # 每个head处理多少维度
+
+        self.softmax = nn.Softmax(dim = -1)
+
+        self.w_q = nn.linear(d_module, n_query_head*self.n_groupsize)
+        self.w_k = nn.Linear(d_module, n_kandv*self.n_groupsize)
+        self.w_v = nn.Linear(d_module, n_kandv*self.n_groupsize)
+        #注意隐藏维度对齐q的数量之后，需要在k和v上进行平均分再乘以kv数量
+        #q输出维度即为d_module,这里表示为总数×平均分后数量，和kv写成一样的形式
+        self.w_combine = nn.Linear(d_module, d_module)
+
+    def forward(self, q, k, v):
+        batch, seq_len, dimension = q.shape
+
+        q = self.w_q(q) #batch, seq, d_module
+        k = self.w_k(k)
+        v = self.w_v(v)
+
+        q = q.view(batch, seq_len, self.n_query_head, self.n_groupsize).permute(0, 2, 1, 3)
+        k = k.view(batch, seq_len, self.n_kandv, self.n_goupsize).permute(0, 2, 1, 3)
+        v = v.view(batch, seq_len, self.n_kandv, self.n_goupsize).permute(0, 2, 1, 3)
+
+        #由于此时q和k维度有差异，self.n_query_head和self.n_kandv不同，需要补充对齐
+        k = k.repeat_interleave(self.self.n_query_head // self.n_kandv, dim =1)
+        v = v.repeat_interleave(self.self.n_query_head // self.n_kandv, dim=1)#相较于MHA的主要差别
+        #dim = 1 是permute换了维度，注意
+
+        score = q @ k.transpose(2, 3) / math.sqrt(self.n_groupsize)
+        #(batch, self.d_module, seq, n_groupsize)
+
+        attention = torch.softmax(score, dim = -1)
+
+        output = attention @ v
+        output = output.transpose(1,2).contiguous() #(batch, seq, self.d_module, n_groupsize)
+        final_output = self.w_combine(output.view(batch, seq_len, -1))
+        return final_output
+
+X = torch.randn(128, 64, 512)
+
